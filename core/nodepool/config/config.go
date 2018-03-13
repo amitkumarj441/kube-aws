@@ -39,9 +39,12 @@ type ProvidedConfig struct {
 	WorkerNodePoolConfig    `yaml:",inline"`
 	DeploymentSettings      `yaml:",inline"`
 	cfg.Experimental        `yaml:",inline"`
-	Private                 bool   `yaml:"private,omitempty"`
-	NodePoolName            string `yaml:"name,omitempty"`
+	cfg.Kubelet             `yaml:",inline"`
+	Plugins                 model.PluginConfigs `yaml:"kubeAwsPlugins,omitempty"`
+	Private                 bool                `yaml:"private,omitempty"`
+	NodePoolName            string              `yaml:"name,omitempty"`
 	ProvidedEncryptService  cfg.EncryptService
+	model.UnknownKeys       `yaml:",inline"`
 }
 
 type DeploymentSettings struct {
@@ -71,14 +74,17 @@ func (c ProvidedConfig) NestedStackName() string {
 
 func (c ProvidedConfig) StackConfig(opts StackTemplateOptions) (*StackConfig, error) {
 	var err error
-	stackConfig := StackConfig{}
+	stackConfig := StackConfig{
+		ExtraCfnResources: map[string]interface{}{},
+	}
 
 	if stackConfig.ComputedConfig, err = c.Config(); err != nil {
 		return nil, fmt.Errorf("failed to generate config : %v", err)
 	}
 
+	tlsBootstrappingEnabled := c.Experimental.TLSBootstrap.Enabled
 	if stackConfig.ComputedConfig.AssetsEncryptionEnabled() {
-		compactAssets, err := cfg.ReadOrCreateCompactAssets(opts.AssetsDir, c.ManageCertificates, cfg.KMSConfig{
+		compactAssets, err := cfg.ReadOrCreateCompactAssets(opts.AssetsDir, c.ManageCertificates, tlsBootstrappingEnabled, false, cfg.KMSConfig{
 			Region:         stackConfig.ComputedConfig.Region,
 			KMSKeyARN:      c.KMSKeyARN,
 			EncryptService: c.ProvidedEncryptService,
@@ -88,7 +94,7 @@ func (c ProvidedConfig) StackConfig(opts StackTemplateOptions) (*StackConfig, er
 		}
 		stackConfig.ComputedConfig.AssetsConfig = compactAssets
 	} else {
-		rawAssets, _ := cfg.ReadOrCreateUnencryptedCompactAssets(opts.AssetsDir, c.ManageCertificates)
+		rawAssets, _ := cfg.ReadOrCreateUnencryptedCompactAssets(opts.AssetsDir, c.ManageCertificates, tlsBootstrappingEnabled, false)
 		stackConfig.ComputedConfig.AssetsConfig = rawAssets
 	}
 
@@ -159,6 +165,13 @@ func (c *ProvidedConfig) Load(main *cfg.Config) error {
 	c.KubeClusterSettings = main.KubeClusterSettings
 	c.Experimental.TLSBootstrap = main.DeploymentSettings.Experimental.TLSBootstrap
 	c.Experimental.NodeDrainer = main.DeploymentSettings.Experimental.NodeDrainer
+	c.Kubelet.RotateCerts = main.DeploymentSettings.Kubelet.RotateCerts
+
+	if c.Experimental.ClusterAutoscalerSupport.Enabled {
+		if !main.Addons.ClusterAutoscaler.Enabled {
+			return fmt.Errorf("clusterAutoscalerSupport can't be enabled on node pools when cluster-autoscaler is not going to be deployed to the cluster")
+		}
+	}
 
 	// Validate whole the inputs including inherited ones
 	if err := c.validate(); err != nil {
@@ -275,6 +288,17 @@ func (c ProvidedConfig) NodeLabels() model.NodeLabels {
 	return labels
 }
 
+func (c ProvidedConfig) FeatureGates() model.FeatureGates {
+	gates := c.NodeSettings.FeatureGates
+	if c.Gpu.Nvidia.IsEnabledOn(c.InstanceType) {
+		gates["Accelerators"] = "true"
+	}
+	if c.Kubelet.RotateCerts.Enabled {
+		gates["RotateKubeletClientCertificate"] = "true"
+	}
+	return gates
+}
+
 func (c ProvidedConfig) WorkerDeploymentSettings() WorkerDeploymentSettings {
 	return WorkerDeploymentSettings{
 		WorkerNodePoolConfig: c.WorkerNodePoolConfig,
@@ -334,8 +358,14 @@ func (c ProvidedConfig) validate() error {
 		return fmt.Errorf("awsNodeLabels can't be enabled for node pool because the total number of characters in clusterName(=\"%s\") + node pool's name(=\"%s\") exceeds the limit of %d", c.ClusterName, c.NodePoolName, limit)
 	}
 
-	if e := cfnresource.ValidateRoleNameLength(c.ClusterName, c.NestedStackName(), c.WorkerNodePoolConfig.IAMConfig.Role.Name, c.Region.String()); e != nil {
-		return e
+	if len(c.WorkerNodePoolConfig.IAMConfig.Role.Name) > 0 {
+		if e := cfnresource.ValidateStableRoleNameLength(c.WorkerNodePoolConfig.IAMConfig.Role.Name, c.Region.String()); e != nil {
+			return e
+		}
+	} else {
+		if e := cfnresource.ValidateUnstableRoleNameLength(c.ClusterName, c.NestedStackName(), c.WorkerNodePoolConfig.IAMConfig.Role.Name, c.Region.String()); e != nil {
+			return e
+		}
 	}
 
 	return nil

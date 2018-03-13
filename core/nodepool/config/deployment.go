@@ -23,17 +23,11 @@ func (c DeploymentSettings) ValidateInputs() error {
 	if c.InternetGateway.HasIdentifier() {
 		return fmt.Errorf("although you can't customize internet gateway per node pool but you did specify \"%v\" in your cluster.yaml", c.InternetGateway)
 	}
-	if c.RouteTableID != "" {
-		return fmt.Errorf("although you can't customize `routeTableId` per node pool but you did specify \"%s\" in your cluster.yaml", c.RouteTableID)
-	}
 	if c.VPCCIDR != "" {
 		return fmt.Errorf("although you can't customize `vpcCIDR` per node pool but you did specify \"%s\" in your cluster.yaml", c.VPCCIDR)
 	}
 	if c.InstanceCIDR != "" {
 		return fmt.Errorf("although you can't customize `instanceCIDR` per node pool but you did specify \"%s\" in your cluster.yaml", c.InstanceCIDR)
-	}
-	if c.MapPublicIPs {
-		return fmt.Errorf("although you can't customize `mapPublicIPs` per node pool but you did specify %v in your cluster.yaml", c.MapPublicIPs)
 	}
 	if c.ElasticFileSystemID != "" {
 		return fmt.Errorf("although you can't customize `elasticFileSystemId` per node pool but you did specify \"%s\" in your cluster.yaml", c.ElasticFileSystemID)
@@ -78,12 +72,15 @@ func (c DeploymentSettings) WithDefaultsFrom(main cfg.DeploymentSettings) Deploy
 
 	// No defaulting for AvailabilityZone: It must be set explicitly for high availability
 
+	// If there was a specific release channel specified for this node pool,
+	// the user would want to use the latest AMI for the channel, not the latest AMI for the default release channel
+	// specified in the top level of cluster.yaml
 	if c.ReleaseChannel == "" {
 		c.ReleaseChannel = main.ReleaseChannel
-	}
 
-	if c.AmiId == "" {
-		c.AmiId = main.AmiId
+		if c.AmiId == "" {
+			c.AmiId = main.AmiId
+		}
 	}
 
 	if c.K8sVer == "" {
@@ -127,6 +124,12 @@ func (c DeploymentSettings) WithDefaultsFrom(main cfg.DeploymentSettings) Deploy
 
 	// Inherit main CloudWatchLogging config
 	c.CloudWatchLogging.MergeIfEmpty(main.CloudWatchLogging)
+
+	// Inherit main AmazonSsmAgent config
+	c.AmazonSsmAgent = main.AmazonSsmAgent
+
+	//Inherit main KubeDns config
+	c.KubeDns.MergeIfEmpty(main.KubeDns)
 
 	return c
 }
